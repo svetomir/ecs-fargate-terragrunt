@@ -13,11 +13,7 @@ inputs = {
 
   # Three zones, the same shape as prod. Subnets cost nothing, and more zones give
   # Fargate Spot more capacity to draw from.
-  azs = [
-    "${include.root.locals.aws_region}a",
-    "${include.root.locals.aws_region}b",
-    "${include.root.locals.aws_region}c",
-  ]
+  azs = include.root.locals.availability_zones
 
   # Public subnets hold only the ALB and the NAT gateway, so they are small.
   public_subnets = ["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24"]
