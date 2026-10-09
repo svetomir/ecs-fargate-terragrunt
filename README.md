@@ -47,7 +47,8 @@ Each environment has five units. Each unit has its own state file.
 You need Terraform 1.11 or newer, Terragrunt 1.0 or newer, and AWS credentials for any account.
 It was written and tested with Terraform 1.15.2, Terragrunt 1.1.2 and AWS provider 6.68.0.
 
-The region is `us-east-1`. It is one value in [`live/root.hcl`](live/root.hcl).
+The region is `us-east-1`, and the three zones are chosen by zone ID. Both are set in
+[`live/root.hcl`](live/root.hcl).
 
 **1. Choose a state bucket.** A plan has to read the state, even an empty one, so it needs an S3 bucket
 before it can start. There are two ways to give it one. Pick either:
@@ -118,11 +119,10 @@ terragrunt --working-dir live/dev run --all -- destroy
   Applying took 13 minutes for dev and about 25 for prod, most of it Redis. Destroying took 18 and 29.
 - **An apply that fails part way can be run again.** It carries on from what already exists.
 - **Dev's load balancer admits nobody until you say who.** The committed source range is a placeholder.
-  To let one address in without editing a file, set this in the shell you use for dev, and only there,
-  because the same variable would also narrow prod:
+  To let one address in without editing a file, set this in your shell. Only the dev units read it:
 
   ```
-  export TF_VAR_ingress_cidrs='["198.51.100.7/32"]'
+  export DEV_INGRESS_CIDR=198.51.100.7/32
   ```
 
 - **Prod resists deletion, on purpose.** A destroy fails on the load balancer until its deletion
@@ -157,17 +157,22 @@ justifying, so every resource in them is one I chose.
 
 **`platform` is separate from `ecs-service`.** The cluster and load balancer are shared by every service
 in an environment. Adding a second service is one more unit that uses `ecs-service` with its own name,
-paths and listener rule priority. It does not need a second load balancer.
+image, paths and listener rule priority. It does not need a second load balancer, and it does not have
+to use Redis: the module's `redis` input is optional.
 
 **`ecs-service` takes its surroundings as inputs.** It creates no VPC, cluster, load balancer or secret.
 It receives their IDs and ARNs, which is what makes it reusable.
+
+**Zones are chosen by ID.** A name such as `us-east-1a` is an alias AWS assigns per account, so it can
+be a different physical zone for each reader. The three zone IDs in `root.hcl` are the same zones for
+everyone. `use1-az3` is left out because AWS has listed it as not offering Fargate.
 
 **State backend.** S3: by default one bucket per account and region, or a bucket you name. There is
 one key per unit, and every key starts with `ecs-fargate/`, so the state can share a bucket with other
 projects. Locking uses S3 itself (`use_lockfile`), so there is no DynamoDB table.
 
 **Lock files are committed.** Each unit's `.terraform.lock.hcl` pins the provider versions, so you plan
-with the same versions I did.
+with the same versions I did. They hold hashes for macOS and Linux, on both Intel and ARM.
 
 ## Why the task can reach Redis
 
@@ -248,23 +253,25 @@ The listener is HTTP only. HTTPS needs a certificate for a domain, which a blank
 
 ## Autoscaling
 
-podinfo is a stateless HTTP API whose requests are cheap and mostly waiting, so it is neither CPU-bound
-nor memory-bound. The service uses two target tracking policies:
+podinfo is a stateless HTTP API. Its handlers are cheap, so a task serves many requests before its CPU
+is busy. The service uses two target tracking policies:
 
-- **Requests per task per minute** (`ALBRequestCountPerTarget`) is the main signal. It follows demand
-  directly.
-- **Average CPU at 60%** is a guardrail for the case where requests become expensive.
+- **Requests per task per minute** (`ALBRequestCountPerTarget`) is the main signal. It measures the load
+  directly, and it rises as soon as traffic does, before the tasks are short of CPU.
+- **Average CPU at 60%** is the backstop. CPU is what a task finally runs out of, and this policy catches
+  what the request count cannot see, such as requests that become more expensive.
 
 AWS adds tasks when either policy asks for more and removes them only when both agree. After a change it
 waits 60 seconds before adding more tasks and 300 seconds before removing any, so a short dip does not
 cause flapping.
 
-There is no memory policy. A Go process does not hand memory back as load falls, so the service would
-scale out and never back in.
+There is no memory policy. podinfo's memory does not follow the request rate, and a garbage-collected
+process gives memory back late, so memory would add tasks readily and be slow to remove them.
 
-The request targets are placeholders. A load test in dev showed the policy scaling out and back in, but
-no test has measured how much one task can serve. The method would be to find the rate at which one
-task's latency starts to degrade and set the target at about two thirds of it.
+The request targets are placeholders, and dev's is set low so that scaling can be shown with a small
+load generator. A load test in dev showed the policy scaling out and back in. No test has measured how
+much one task can serve. The method would be to find the rate at which one task's latency starts to
+degrade and set the target at about two thirds of it.
 
 ## Logs
 
@@ -283,8 +290,8 @@ as a load balancer attribute, with an S3 bucket, is the older way that AWS now l
 
 ## Hardening and operations
 
-- **Containers:** both run as a non-root user, with a read-only root filesystem and all Linux
-  capabilities dropped.
+- **Containers:** both have a read-only root filesystem and all Linux capabilities dropped. The Redis
+  check runs as the `redis` user, and podinfo's image runs as a non-root user of its own.
 - **Logging cannot stall the app:** log delivery is non-blocking, with a buffer.
 - **`apply` waits for the tasks:** it succeeds only when the new tasks are running and healthy, so a
   pipeline sees a failed Redis check as a failed deploy.
@@ -352,7 +359,8 @@ The ones that matter most come first.
 - **Modules are local paths.** Both environments always use the same module code. Modules in their own
   repository, referenced by version tag, would let prod stay on a version while dev tries the next.
 - **Images are public and pinned by tag.** podinfo `6.15.0` comes from GitHub's registry and
-  `redis:7.4-alpine` from ECR Public. A tag can be moved; a digest cannot.
+  `redis:7.4-alpine` from ECR Public. A tag can be moved; a digest cannot. Every task start pulls both,
+  so starting a task depends on those two registries and on a NAT gateway.
 - **NAT gateways for outbound access.** Simple, but a fixed cost per gateway, and prod has three.
 - **`engine = "redis"`.** Valkey is the cheaper drop-in AWS now recommends.
 - **Logs go to CloudWatch, which charges per gigabyte delivered.** That is negligible here. At high
@@ -421,7 +429,7 @@ The rest, by area. The first three appear again in their groups, with the detail
   `terragrunt run --all -- plan` was run for each environment in a real AWS account. Both succeeded: 5
   units each, 77 resources in dev and 85 in prod.
 - **Formatting and validation.** `terraform fmt`, `terragrunt hcl fmt` and `terraform validate` pass for
-  every module.
+  every module. `terraform test` covers `ecs-service` with and without Redis, against a mocked provider.
 - **The state bucket bootstrap.** It was run once, and the bucket's versioning, encryption, public access
   block and policy were read back.
 
@@ -431,6 +439,9 @@ The rest, by area. The first three appear again in their groups, with the detail
   ones before it. A second plan reported no changes in any of them.
 - **The startup check.** Every task logged `Redis replied: PONG` and only then started podinfo. That one
   line covers the network path, the security groups, TLS, the AUTH token and the secret injection.
+- **A failing check.** With the Redis port set wrong on purpose, three tasks in a row stopped at the
+  check, and podinfo never started in any of them. The circuit breaker rolled the service back after about
+  four minutes, the old task kept serving throughout, and `apply` ended with an error.
 - **Prod's own settings,** read back from AWS:
   - Redis has a primary and a replica in different zones, with automatic failover and Multi-AZ on, and
     the snapshot and maintenance times as set.
@@ -442,8 +453,9 @@ The rest, by area. The first three appear again in their groups, with the detail
   afterwards reported no changes. The check sends `PING`, which a replica answers too, so this shows the
   endpoint leads to a node that accepts the connection and the token.
 - **Autoscaling, in dev.** Under about 1,960 requests a minute, against a target of 600 per task, the
-  service went from 1 task to 3, one in each zone, and came back down after the load stopped. The CPU
-  alarm never fired, which is the case for scaling on requests.
+  service went from 1 task to 3, one in each zone, and came back down after the load stopped. CPU
+  stayed low throughout, because the target is far below what a task can serve. The test shows that the
+  policy works, not where the target should be.
 - **Teardown.** Both environments were destroyed again. Prod's deletion protection had to be turned off
   first, and Redis took its final snapshot on the way out. Each service was then asked directly, and
   nothing that costs money was left.
