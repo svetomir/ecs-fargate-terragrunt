@@ -3,6 +3,9 @@
 #   task      - used by the application code once it is running.
 
 locals {
+  # Every secret a task is handed when it starts.
+  secret_arns = concat(values(var.secrets), local.uses_redis ? [var.redis.auth_secret_arn] : [])
+
   # Both roles can only be assumed by ECS tasks.
   ecs_tasks_trust_policy = jsonencode({
     Version = "2012-10-17"
@@ -36,8 +39,11 @@ resource "aws_iam_role_policy" "execution_logs" {
 }
 
 # Read exactly the secrets the task uses: the application's own, and the Redis
-# AUTH token for the startup check.
+# AUTH token for the startup check. A policy with an empty resource list is not
+# valid, so it is left out for a service with no secrets at all.
 resource "aws_iam_role_policy" "execution_secrets" {
+  count = length(local.secret_arns) > 0 ? 1 : 0
+
   name = "read-secrets"
   role = aws_iam_role.execution.id
 
@@ -46,7 +52,7 @@ resource "aws_iam_role_policy" "execution_secrets" {
     Statement = [{
       Effect   = "Allow"
       Action   = "secretsmanager:GetSecretValue"
-      Resource = concat(values(var.secrets), [var.redis_auth_secret_arn])
+      Resource = local.secret_arns
     }]
   })
 }

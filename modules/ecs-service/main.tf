@@ -1,15 +1,23 @@
 data "aws_region" "current" {}
 
 locals {
+  # Redis is optional. When var.redis is set, the task gets a startup check, the
+  # application waits for it, and the tasks join the Redis client security group.
+  # When it is null, none of that is created.
+  uses_redis = var.redis != null
+
+  # Provides redis-cli. The check runs as the `redis` user this image defines.
+  redis_check_image = "public.ecr.aws/docker/library/redis:7.4-alpine"
+
   # The startup check: connect to Redis over TLS, send PING, and succeed only if
-  # the reply is PONG.
+  # the reply is PONG. Empty for a service that does not use Redis.
   #
   # redis-cli reads the token from REDISCLI_AUTH. `timeout` stops it hanging on a
   # blocked connection. The reply is printed, so a failure is visible in the logs.
   # The last line decides the result: redis-cli exits 0 even when Redis refuses
   # the token, so the script compares the reply instead of trusting the exit code.
-  redis_check_script = <<-EOT
-    reply=$(timeout 10 redis-cli --tls -h ${var.redis_host} -p ${var.redis_port} ping 2>&1)
+  redis_check_script = !local.uses_redis ? "" : <<-EOT
+    reply=$(timeout 10 redis-cli --tls -h ${var.redis.host} -p ${var.redis.port} ping 2>&1)
     echo "Redis replied: $reply"
     [ "$reply" = PONG ]
   EOT
@@ -41,12 +49,13 @@ resource "aws_ecs_task_definition" "this" {
 
   # The container list is in ECS's own JSON format, which is why the keys inside
   # it are camelCase, unlike the rest of this file.
-  container_definitions = jsonencode([
-    # Runs first and exits. The application only starts if this check succeeds, so
-    # a task that cannot reach or log in to Redis never takes traffic.
-    {
+  container_definitions = jsonencode(concat(
+    # Only for a service that uses Redis. It runs first and exits. The application
+    # only starts if this check succeeds, so a task that cannot reach or log in to
+    # Redis never takes traffic.
+    local.uses_redis ? [{
       name      = "redis-check"
-      image     = var.redis_check_image
+      image     = local.redis_check_image
       essential = false
 
       # Least privilege inside the container: not root, an image it cannot write
@@ -59,7 +68,7 @@ resource "aws_ecs_task_definition" "this" {
 
       secrets = [{
         name      = "REDISCLI_AUTH"
-        valueFrom = var.redis_auth_secret_arn
+        valueFrom = var.redis.auth_secret_arn
       }]
 
       # Non-blocking: if CloudWatch Logs is slow or unreachable, log lines wait in
@@ -75,8 +84,8 @@ resource "aws_ecs_task_definition" "this" {
           max-buffer-size       = "25m"
         }
       }
-    },
-    {
+    }] : [],
+    [{
       name      = "app"
       image     = var.image
       essential = true
@@ -97,10 +106,11 @@ resource "aws_ecs_task_definition" "this" {
       environment = [for name, value in var.environment : { name = name, value = value }]
       secrets     = [for name, arn in var.secrets : { name = name, valueFrom = arn }]
 
-      dependsOn = [{
+      # Wait for the Redis check, when there is one.
+      dependsOn = local.uses_redis ? [{
         containerName = "redis-check"
         condition     = "SUCCESS"
-      }]
+      }] : []
 
       # ECS runs this command inside the container every 30 seconds and allows it
       # 5 seconds. Three failures in a row mark the task unhealthy, and ECS
@@ -113,7 +123,7 @@ resource "aws_ecs_task_definition" "this" {
         startPeriod = 10
       }
 
-      # The same non-blocking logging as the check above.
+      # Non-blocking, for the same reason as in the check above.
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -124,8 +134,8 @@ resource "aws_ecs_task_definition" "this" {
           max-buffer-size       = "25m"
         }
       }
-    },
-  ])
+    }],
+  ))
 }
 
 resource "aws_ecs_service" "this" {
@@ -144,7 +154,7 @@ resource "aws_ecs_service" "this" {
 
   network_configuration {
     subnets          = var.subnet_ids
-    security_groups  = [aws_security_group.service.id, var.redis_client_security_group_id]
+    security_groups  = concat([aws_security_group.service.id], local.uses_redis ? [var.redis.client_security_group_id] : [])
     assign_public_ip = false
   }
 

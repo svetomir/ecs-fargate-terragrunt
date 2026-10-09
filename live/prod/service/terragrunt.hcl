@@ -89,11 +89,13 @@ inputs = {
   }
 
   # Redis: where it is, the security group that may reach it, and the secret
-  # holding its AUTH token.
-  redis_host                     = dependency.redis.outputs.primary_endpoint_address
-  redis_port                     = dependency.redis.outputs.port
-  redis_client_security_group_id = dependency.redis.outputs.client_security_group_id
-  redis_auth_secret_arn          = dependency.redis.outputs.auth_token_secret_arn
+  # holding its AUTH token. Leaving this block out gives a service without Redis.
+  redis = {
+    host                     = dependency.redis.outputs.primary_endpoint_address
+    port                     = dependency.redis.outputs.port
+    client_security_group_id = dependency.redis.outputs.client_security_group_id
+    auth_secret_arn          = dependency.redis.outputs.auth_token_secret_arn
+  }
 
   # Larger tasks on on-demand capacity, which cannot be reclaimed.
   cpu               = 512

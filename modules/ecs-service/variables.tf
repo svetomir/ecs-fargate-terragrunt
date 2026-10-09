@@ -105,30 +105,15 @@ variable "liveness_command" {
 
 # --- Redis ---
 
-variable "redis_host" {
-  description = "Address of the Redis primary endpoint."
-  type        = string
-}
-
-variable "redis_port" {
-  description = "Port Redis listens on."
-  type        = number
-}
-
-variable "redis_client_security_group_id" {
-  description = "Security group that is allowed to reach Redis. Attached to the tasks."
-  type        = string
-}
-
-variable "redis_auth_secret_arn" {
-  description = "Secrets Manager secret holding the Redis AUTH token. Given to the startup connectivity check only."
-  type        = string
-}
-
-variable "redis_check_image" {
-  description = "Image that provides redis-cli for the startup connectivity check."
-  type        = string
-  default     = "public.ecr.aws/docker/library/redis:7.4-alpine"
+variable "redis" {
+  description = "The Redis this service needs, or null for a service that does not use Redis. When set, a startup check must reach Redis before the application starts, and the tasks join its client security group."
+  type = object({
+    host                     = string # Address of the primary endpoint.
+    port                     = number # Port Redis listens on.
+    client_security_group_id = string # Security group that is allowed to reach Redis.
+    auth_secret_arn          = string # Secrets Manager secret holding the AUTH token.
+  })
+  default = null
 }
 
 # --- Scaling ---
