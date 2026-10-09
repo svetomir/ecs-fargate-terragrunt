@@ -29,6 +29,10 @@ locals {
   state_bucket_region = get_env("STATE_BUCKET_REGION", local.aws_region)
 }
 
+# Always run Terraform. Terragrunt would otherwise pick OpenTofu whenever it is
+# installed, and this repo has only been run with Terraform.
+terraform_binary = "terraform"
+
 # Fail early with a clear message on tool versions this repo was not written for.
 # 1.11 is the first release with S3 native state locking and write-only arguments.
 terraform_version_constraint  = ">= 1.11"

@@ -45,7 +45,8 @@ Each environment has five units. Each unit has its own state file.
 ## How to plan it
 
 You need Terraform 1.11 or newer, Terragrunt 1.0 or newer, and AWS credentials for any account.
-It was written and tested with Terraform 1.15.2, Terragrunt 1.1.2 and AWS provider 6.68.0.
+It was written and tested with Terraform 1.15.2, Terragrunt 1.1.2 and AWS provider 6.68.0. The repo is
+pinned to Terraform, so that is what runs even where OpenTofu is installed.
 
 The region is `us-east-1`, and the three zones are chosen by zone ID. Both are set in
 [`live/root.hcl`](live/root.hcl).
@@ -89,16 +90,13 @@ terragrunt --working-dir live/prod run --all -- plan
 Each run should end with `Run Summary  5 units ... Succeeded 5`, adding 77 resources in dev and 85 in prod.
 A single unit can be planned on its own, for example `terragrunt --working-dir live/dev/redis plan`.
 
-Three things to know when reading the output:
+Two things to know when reading the output:
 
 - **Placeholder values are expected.** With nothing applied, a unit cannot read real outputs from the
   units it depends on. Each `dependency` block therefore has `mock_outputs`, which Terragrunt uses for
   `init`, `validate` and `plan` only. You will see six warnings saying so, and values such as
   `vpc-00000000000000000`, `mock-redis.invalid` and mock secret ARNs in the `redis`, `platform` and
   `service` plans. An `apply` does not accept mocks; it fails until the unit it depends on exists.
-- **Terragrunt prefers OpenTofu.** If `tofu` is installed it is used instead of `terraform`. The version
-  constraint admits OpenTofu 1.11+, but I have only tested with Terraform. Add `--tf-path terraform` to
-  force it.
 - **`--provider-cache` saves time.** Added after `run --all`, it downloads each provider once instead of
   once per unit.
 
