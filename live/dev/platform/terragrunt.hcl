@@ -26,10 +26,12 @@ inputs = {
   vpc_cidr   = dependency.network.outputs.vpc_cidr_block
   subnet_ids = dependency.network.outputs.public_subnets
 
-  # Dev is not open to the internet: only these source ranges reach the load balancer.
-  # 203.0.113.0/24 is reserved for documentation and routes nowhere, so dev stays
-  # closed until this is replaced with the team's VPN or office range.
-  ingress_cidrs = ["203.0.113.0/24"]
+  # Dev is not open to the internet: only this source range reaches the load balancer.
+  # The default, 203.0.113.0/24, is reserved for documentation and routes nowhere,
+  # so dev stays closed until someone names a real range. Setting DEV_INGRESS_CIDR
+  # in a shell does that, for example to your own address with /32 after it. The
+  # variable is read here and nowhere else, so it cannot change prod.
+  ingress_cidrs = [get_env("DEV_INGRESS_CIDR", "203.0.113.0/24")]
 
   # The load balancer's access logs and the cluster's event and action logs are
   # kept for a week.
