@@ -46,5 +46,9 @@ terraform.rc
 # Terragrunt working directories: downloaded modules, providers and generated files
 .terragrunt-cache/
 
+# A lock file that `terraform init` writes when a module is tested on its own.
+# The lock files that count are the committed ones next to each unit under live/.
+/modules/*/.terraform.lock.hcl
+
 # macOS
 .DS_Store

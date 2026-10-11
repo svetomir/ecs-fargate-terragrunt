@@ -9,7 +9,8 @@ locals {
   # The three zones every environment uses, by zone ID. A zone name such as
   # us-east-1a is an alias AWS assigns per account, so it can mean a different
   # physical zone for each reader. A zone ID is the same zone for everyone.
-  # use1-az3 is left out because AWS has listed it as not offering Fargate.
+  # use1-az3 is left out as a precaution: AWS excludes it for Windows containers
+  # on Fargate. It lists no such limit for Linux containers, which this repo runs.
   availability_zones = ["use1-az1", "use1-az2", "use1-az4"]
 
   # Read from live/<env>/env.hcl, found by walking up from the unit that includes this file.

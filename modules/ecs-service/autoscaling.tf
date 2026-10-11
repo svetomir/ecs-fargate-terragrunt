@@ -1,12 +1,12 @@
-# The service is a stateless HTTP API whose requests are cheap and mostly waiting,
-# so the best signal of load is how many requests each task is handling. CPU is a
-# second policy for the case where requests become expensive.
+# The service is a stateless HTTP API whose requests are cheap, so load shows first
+# in how many requests each task is handling. CPU is a second policy for the case
+# where requests become expensive.
 #
 # With two target tracking policies, AWS adds tasks when either one asks for more
 # and removes tasks only when both agree.
 #
-# There is no memory policy: a Go process does not hand memory back as load falls,
-# so the service would scale out and never back in.
+# There is no memory policy: for a service like this, memory hardly moves with
+# the load, so a memory policy would have nothing to act on.
 
 resource "aws_appautoscaling_target" "this" {
   service_namespace  = "ecs"
