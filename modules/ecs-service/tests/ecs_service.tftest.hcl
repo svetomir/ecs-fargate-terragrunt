@@ -1,4 +1,5 @@
-# Checks that Redis really is optional in this module.
+# Checks the module's optional inputs and the inputs it refuses: Redis, a private
+# image, further security groups, the target group's name, and the validations.
 #
 # Run it with `terraform test` in modules/ecs-service. The AWS provider is mocked,
 # so it needs no credentials and creates nothing.
@@ -26,7 +27,7 @@ mock_provider "aws" {
   }
 }
 
-# The inputs every service needs. Neither run changes them.
+# The inputs every service needs. Each run changes only what it names.
 variables {
   name                     = "test-service"
   vpc_id                   = "vpc-00000000000000000"
@@ -71,6 +72,11 @@ run "without_redis" {
     condition     = length(aws_iam_role_policy.execution_secrets) == 0
     error_message = "With no secrets at all, the policy for reading secrets should not exist."
   }
+
+  assert {
+    condition     = length(aws_iam_role_policy.execution_pull) == 0
+    error_message = "For a public image, the policy for pulling images should not exist."
+  }
 }
 
 run "with_redis" {
@@ -107,4 +113,90 @@ run "with_redis" {
     condition     = jsondecode(aws_iam_role_policy.execution_secrets[0].policy).Statement[0].Resource == ["arn:aws:secretsmanager:us-east-1:000000000000:secret:redis-token"]
     error_message = "The execution role should be able to read the Redis token and nothing more."
   }
+}
+
+run "private_image" {
+  variables {
+    ecr_repository_arns = ["arn:aws:ecr:us-east-1:000000000000:repository/app"]
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role_policy.execution_pull[0].policy).Statement[1].Resource == ["arn:aws:ecr:us-east-1:000000000000:repository/app"]
+    error_message = "The execution role should be able to pull from the repository it was given and no other."
+  }
+}
+
+run "further_security_groups" {
+  variables {
+    additional_security_group_ids = ["sg-00000000000000003"]
+  }
+
+  assert {
+    condition     = length(aws_ecs_service.this.network_configuration[0].security_groups) == 2
+    error_message = "The tasks should carry the service's own group and the one passed in."
+  }
+
+  assert {
+    condition     = contains(aws_ecs_service.this.network_configuration[0].security_groups, "sg-00000000000000003")
+    error_message = "The group passed in should be attached to the tasks."
+  }
+}
+
+# A changed port has to give the target group a new name. See network.tf.
+run "target_group_name_follows_the_port" {
+  variables {
+    container_port = 9090
+  }
+
+  assert {
+    condition     = aws_lb_target_group.this.name == "test-service-9090"
+    error_message = "The target group's name should end in the container port."
+  }
+}
+
+# The longest name the module accepts, with the longest port, is a target group
+# name of exactly 32 characters. The provider checks that length itself.
+run "accepts_the_longest_name" {
+  command = plan
+
+  variables {
+    name           = "a-name-of-26-characters-xx"
+    container_port = 65535
+  }
+
+  assert {
+    condition     = length(aws_lb_target_group.this.name) == 32
+    error_message = "A 26-character name and a five-digit port should give a 32-character target group name."
+  }
+}
+
+run "rejects_a_longer_name" {
+  command = plan
+
+  variables {
+    name = "a-name-of-27-characters-xxx"
+  }
+
+  expect_failures = [var.name]
+}
+
+run "rejects_an_unknown_capacity_provider" {
+  command = plan
+
+  variables {
+    capacity_provider = "EC2"
+  }
+
+  expect_failures = [var.capacity_provider]
+}
+
+run "rejects_max_tasks_below_min_tasks" {
+  command = plan
+
+  variables {
+    min_tasks = 3
+    max_tasks = 2
+  }
+
+  expect_failures = [var.max_tasks]
 }

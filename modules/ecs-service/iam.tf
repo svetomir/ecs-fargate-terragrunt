@@ -22,8 +22,7 @@ resource "aws_iam_role" "execution" {
   assume_role_policy = local.ecs_tasks_trust_policy
 }
 
-# Write to this service's log group and nowhere else. Both images are public, so
-# no registry permissions are needed.
+# Write to this service's log group and nowhere else.
 resource "aws_iam_role_policy" "execution_logs" {
   name = "write-logs"
   role = aws_iam_role.execution.id
@@ -54,6 +53,34 @@ resource "aws_iam_role_policy" "execution_secrets" {
       Action   = "secretsmanager:GetSecretValue"
       Resource = local.secret_arns
     }]
+  })
+}
+
+# Pull the image from the private ECR repositories the caller names. A public
+# image needs no permission, so the policy is left out when there are none. The
+# Redis check's image is public either way.
+resource "aws_iam_role_policy" "execution_pull" {
+  count = length(var.ecr_repository_arns) > 0 ? 1 : 0
+
+  name = "pull-images"
+  role = aws_iam_role.execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      # Signing in to the registry. AWS does not let this action be limited to a
+      # repository; the three below are.
+      {
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"]
+        Resource = var.ecr_repository_arns
+      },
+    ]
   })
 }
 

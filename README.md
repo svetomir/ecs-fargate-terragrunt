@@ -3,12 +3,11 @@
 A containerized web app ([podinfo](https://github.com/stefanprodan/podinfo)) on ECS Fargate, for two
 environments (dev and prod), managed with Terragrunt.
 
-The app sits behind an Application Load Balancer, reads one secret from Secrets Manager, and proves at
-startup that it can reach and log in to an ElastiCache Redis replication group. It scales on request rate.
+The app sits behind an Application Load Balancer and reads one secret from Secrets Manager. Before it
+starts, a check in the same task proves that the task can reach and log in to an ElastiCache Redis
+replication group. The service scales on request rate.
 
-Both environments can be planned with nothing applied. Both were also applied in a real AWS account, to
-check what a plan cannot show, and destroyed again. The section
-[What has been verified](#what-has-been-verified) says exactly what was checked and how.
+Both environments can be planned with nothing applied.
 
 ```mermaid
 flowchart LR
@@ -44,13 +43,14 @@ Each environment has five units. Each unit has its own state file.
 
 ## How to plan it
 
-You need Terraform 1.11 or newer, Terragrunt 1.0 or newer, and AWS credentials for any account.
-It was written and tested with Terraform 1.15.2, Terragrunt 1.1.2 and AWS provider 6.68.0. The repo is
-pinned to Terraform, so that is what runs even where OpenTofu is installed.
+You need Terraform, Terragrunt and AWS credentials for any account. It was written and tested with
+Terraform 1.15.2, Terragrunt 1.1.2 and AWS provider 6.68.0. Its version constraints require at least
+Terraform 1.11 and Terragrunt 1.0. The repo is pinned to Terraform, so that is what runs even where
+OpenTofu is installed.
 
 If you only have OpenTofu, set `TG_TF_PATH=tofu` in your shell, which overrides the pin. OpenTofu 1.13.1
 plans both environments with the same result. It rewrites the `.terraform.lock.hcl` files to name its
-own registry, at the same provider versions. Nothing has been applied with OpenTofu.
+own registry, at the same provider versions.
 
 The region is `us-east-1`, and the three zones are chosen by zone ID. Both are set in
 [`live/root.hcl`](live/root.hcl).
@@ -107,45 +107,6 @@ Two things to know when reading the output:
 To remove the bucket from option A afterwards, empty it and delete it in the S3 console. It is versioned,
 so `aws s3 rb --force` alone may not be enough.
 
-## If you apply it
-
-A few things are worth knowing before you apply. I found them by applying and destroying both
-environments.
-
-```
-terragrunt --working-dir live/dev run --all -- apply
-terragrunt --working-dir live/dev run --all -- destroy
-```
-
-- **Order and time.** Terragrunt applies the units in dependency order and destroys them in reverse.
-  Over several runs, applying took 11 to 13 minutes for dev and 15 to 25 for prod, most of it Redis.
-  Destroying took 12 to 18 and 15 to 29.
-- **An apply that fails part way can be run again.** It carries on from what already exists.
-- **Dev's load balancer admits nobody until you say who.** The committed source range is a placeholder.
-  To let one address in without editing a file, set this in your shell. Only one unit reads it,
-  `live/dev/platform`:
-
-  ```
-  export DEV_INGRESS_CIDR=198.51.100.7/32
-  ```
-
-- **Prod resists deletion, on purpose.** A destroy fails on the load balancer until its deletion
-  protection is turned off, in the code or with the AWS CLI. I used the CLI:
-
-  ```
-  aws elbv2 modify-load-balancer-attributes --load-balancer-arn <arn> \
-    --attributes Key=deletion_protection.enabled,Value=false
-  ```
-
-- **A prod destroy leaves three things behind:**
-  - both secrets, scheduled for deletion in 30 days, with their names taken until then.
-    `aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery` removes one;
-  - the final snapshot Redis takes when it is deleted, `ecs-fargate-prod-redis-final`;
-  - a log group that Container Insights creates by itself,
-    `/aws/ecs/containerinsights/ecs-fargate-prod/performance`.
-
-What the two environments cost while they run is under [Dev versus prod](#dev-versus-prod).
-
 ## Design decisions
 
 **One state per unit.** The network, Redis, the secret, the shared platform and the service change at
@@ -162,18 +123,16 @@ justifying, so every resource in them is one I chose.
 **`platform` is separate from `ecs-service`.** The cluster and load balancer are shared by every service
 in an environment. Adding a second service is one more unit that uses `ecs-service` with its own name,
 image, paths and listener rule priority. It does not need a second load balancer, and it does not have
-to use Redis: the module's `redis` input is optional. Its image has to be a public one for now; see
-[Trade-offs](#trade-offs).
+to use Redis: the module's `redis` input is optional. Its image can be a public one or one in private
+ECR, named in `ecr_repository_arns`. If it calls something other than Redis, a database for example,
+`additional_security_group_ids` attaches that thing's client security group to its tasks.
 
 **`ecs-service` takes its surroundings as inputs.** It creates no VPC, cluster, load balancer or secret.
 It receives their IDs and ARNs, which is what makes it reusable.
 
 **Zones are chosen by ID.** A name such as `us-east-1a` is an alias AWS assigns per account, so it can
 be a different physical zone for each reader. The three zone IDs in `root.hcl` are the same zones for
-everyone. `use1-az3` is left out as a precaution: AWS's
-[list of Fargate regions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate-Regions.html)
-excludes it for Windows containers. It lists no such limit for Linux containers, which is what this
-repo runs, so any three zones of `us-east-1` would do.
+everyone.
 
 **State backend.** S3: by default one bucket per account and region, or a bucket you name. There is
 one key per unit, and every key starts with `ecs-fargate/`, so the state can share a bucket with other
@@ -205,8 +164,8 @@ with the same versions I did. They hold hashes for macOS and Linux, on both Inte
 The connection is made by `redis-check` and not by podinfo, because podinfo's built-in Redis client does
 not support TLS.
 
-A task can otherwise only receive traffic from the load balancer on port 9898 and send HTTPS (image
-pulls, Secrets Manager, CloudWatch Logs).
+A task can otherwise only receive traffic from the load balancer on port 9898 and send on port 443,
+which image pulls, Secrets Manager and CloudWatch Logs need.
 
 **Where to see this in a plan**
 
@@ -236,7 +195,7 @@ in the same run.
 What both have in common:
 
 - **The value is never in the plan or the state.** It is generated as an ephemeral `random_password` and
-  written through a write-only argument. Raising a version number generates a new one.
+  written through a write-only argument.
 - **Secrets Manager holds the only copy of the Redis token.** ElastiCache is given the value read back
   from the secret, not the generated one, so a re-run after a failed apply still uses the stored token.
 - **The task definition holds ARNs, not values.** ECS fetches the values when a task starts, so running
@@ -250,8 +209,8 @@ The load balancer is the only public entry point. Its listener answers 404 by de
 adds a rule that forwards only the paths it owns. For podinfo those are `/`, `/version`, `/api/*` and
 `/token*`.
 
-This matters because podinfo is a demo app: `GET /env` prints its environment, which includes its
-signing key, and `GET /panic` kills the process. Neither path is forwarded.
+This matters because podinfo is a demo app: `GET /env` prints its environment and `GET /panic` kills
+the process. Neither path is forwarded.
 
 Dev is not open to the internet. Its load balancer admits only the ranges in `ingress_cidrs`. The
 committed value, `203.0.113.0/24`, is a reserved documentation range, so dev stays closed until it is
@@ -273,19 +232,16 @@ AWS adds tasks when either policy asks for more and removes them only when both 
 waits 60 seconds before adding more tasks and 300 seconds before removing any, so a short dip does not
 cause flapping.
 
-There is no memory policy. podinfo's memory hardly moves with the load: in the load test a task used
-under 5% of its memory at three and a half times the request target, so a memory policy would have
+There is no memory policy. podinfo's memory hardly moves with the load, so a memory policy would have
 nothing to act on.
 
 The request targets are placeholders, and dev's is set low so that scaling can be shown with a small
-load generator. A load test in dev showed the policy scaling out and back in. In it, one task at three
-and a half times dev's target used about 4% of its CPU. No test has measured how much one task can
-serve. The method would be to find the rate at which one task's latency starts to degrade and set the
-target at about two thirds of it.
+load generator. No test has measured how much one task can serve. The method would be to find the rate
+at which one task's latency starts to degrade and set the target at about two thirds of it.
 
 ## Logs
 
-Everything is in CloudWatch Logs, kept 7 days in dev and 90 in prod.
+Everything is in CloudWatch Logs. The log groups this repo creates keep 7 days in dev and 90 in prod.
 
 | Log | What it answers |
 |---|---|
@@ -295,8 +251,7 @@ Everything is in CloudWatch Logs, kept 7 days in dev and 90 in prod.
 | ECS action logs | What ECS did on the account's behalf, such as each step of a deployment |
 | Redis engine log and slow log | Restarts, failovers and slow commands |
 
-The load balancer and ECS logs are delivered through the CloudWatch Logs integration. Switching logs on
-as a load balancer attribute, with an S3 bucket, is the older way that AWS now labels "legacy".
+The load balancer and ECS logs are delivered through the CloudWatch Logs integration.
 
 ## Hardening and operations
 
@@ -329,14 +284,15 @@ Subnets cost nothing, so dev exercises the same layout as prod. What dev lacks i
 | Task size | 0.25 vCPU / 512 MiB | 0.5 vCPU / 1 GiB |
 | Tasks, min to max | 1 to 3 | 3 to 12 |
 | Requests per task per minute | 600 | 3000 |
-| Retention of every log | 7 days | 90 days |
+| Log retention | 7 days | 90 days |
 
-Prod never runs fewer than three tasks, one per zone, so losing a zone leaves two.
+Prod never runs fewer than three tasks. ECS spreads them across the three zones and evens them out
+again after a change, so losing a zone should leave two.
 
 **What losing a zone does**
 
-- **In prod,** two of the three tasks keep serving, and the NAT gateways of the other two zones keep
-  working. If the Redis primary was in that zone, the replica takes over; in a test that took 20 seconds.
+- **In prod,** the tasks in the other two zones keep serving, and the NAT gateways of those zones keep
+  working. If the Redis primary was in that zone, the replica takes over.
 - **In dev,** it depends on the zone. The one NAT gateway and the one Redis node each sit in a single
   zone. If that zone is lost, outbound access or Redis goes with it, and no new task can start.
 
@@ -361,9 +317,7 @@ The ones that matter most come first.
 - **A Redis token, not IAM authentication.** IAM authentication stores no credential, which is better.
   But the client has to sign its own short-lived tokens, and `redis-cli` cannot, so the check would need
   a purpose-built image.
-- **Token rotation is only half automated.** Raising the token's version writes a new one to the secret
-  and to Redis, and ElastiCache keeps accepting the old one so running tasks are not cut off. Redeploying
-  the tasks and retiring the old token are still manual.
+- **Token rotation is not automated.** The Redis token is not rotated on a schedule.
 - **Planning the `redis` unit reads the token.** Once the secret exists, each plan reads it into memory
   to hand to ElastiCache. It is not stored, but whoever plans needs permission to read that secret.
 - **Modules are local paths.** Both environments always use the same module code. Modules in their own
@@ -371,15 +325,17 @@ The ones that matter most come first.
 - **Images are public and pinned by tag.** podinfo `6.15.0` comes from GitHub's registry and
   `redis:7.4-alpine` from ECR Public. A tag can be moved; a digest cannot. Every task start pulls both,
   so starting a task depends on those two registries and on a NAT gateway.
-- **`ecs-service` cannot pull from a private registry.** Its execution role may write logs and read the
-  task's secrets, and nothing else. A service whose image is in private ECR would need the pull
-  permissions added to that role, and the module has no input for them and no output for the role.
+- **Private images from ECR only.** `ecr_repository_arns` lets the execution role pull from the
+  repositories it names. A registry that wants a user name and password is not supported: the module has
+  no input for the credentials.
+- **Changing a service's port interrupts it.** The listener rule moves to the new target group before
+  any task is in it, so the load balancer answers 503 until the first new task has registered there.
+  Avoiding that means keeping both target groups behind the rule for a while, as a blue/green
+  deployment does.
 - **NAT gateways for outbound access.** Simple, but a fixed cost per gateway, and prod has three.
 - **`engine = "redis"`.** Valkey is the cheaper drop-in AWS now recommends.
 - **Logs go to CloudWatch, which charges per gigabyte delivered.** That is negligible here. At high
   traffic the same load balancer delivery can point at S3 instead.
-- **Two CloudWatch Logs resource policies per environment.** An account may have ten per region, so
-  many environments in one account would need a single shared policy.
 - **The state bucket is created by Terragrunt's bootstrap,** not managed as code. S3 is the only
   backend: there is no local-state mode, so the path you plan with is the one that would be used.
 
@@ -388,11 +344,9 @@ The ones that matter most come first.
 **What I would do first**
 
 1. **HTTPS and an edge in front.** A domain and certificate, then CloudFront and WAF with the load
-   balancer made internal. Today traffic is plain HTTP and prod's load balancer faces the internet.
-2. **An account per environment, and a pipeline.** Today both environments share an account, and every
-   apply runs from a laptop with admin rights.
-3. **Alarms, and a load test.** Today nothing tells anyone when the service is failing, and the scaling
-   targets are guesses.
+   balancer made internal.
+2. **An account per environment, and a pipeline.**
+3. **Alarms, and a load test.**
 
 The rest, by area. The first three appear again in their groups, with the detail.
 
@@ -402,13 +356,12 @@ The rest, by area. The first three appear again in their groups, with the detail
 - Dev reachable only over a VPN such as Tailscale, with an internal load balancer.
 - A domain, certificate and DNS records.
 - Encryption in transit on every hop: HTTPS from CloudFront to the load balancer, and from the load
-  balancer to the tasks. Today the hop to the tasks is plain HTTP inside the VPC.
+  balancer to the tasks.
 
 **Accounts and delivery**
 - One account per environment under an AWS organization, with an account level in the directory layout
   and `allowed_account_ids` on the provider.
-- CI that plans on pull requests and applies on merge, assuming a role per account, with separate
-  read-only plan and apply roles.
+- CI that plans on pull requests and applies on merge, assuming a role per account.
 - `tflint`, a policy scanner and `terraform test` in that pipeline.
 - Modules in their own repository, versioned by tag.
 
@@ -433,68 +386,3 @@ The rest, by area. The first three appear again in their groups, with the detail
 - ARM64 tasks, which are cheaper on Fargate; both images support it.
 - Scheduled scaling to zero for dev outside working hours.
 - The state bucket managed as code, with a lifecycle rule for old object versions.
-
-## What has been verified
-
-Everything below was run on 11 October 2026 against the code as it is here. Only comments and this
-README have changed since. The one exception carries its own date.
-
-**By planning, from a clean copy with nothing applied**
-
-- **Both environments plan.** The committed files were copied to an empty directory and
-  `terragrunt run --all -- plan` was run for each environment in a real AWS account. Both succeeded: 5
-  units each, 77 resources in dev and 85 in prod.
-- **The same with OpenTofu.** With `TG_TF_PATH=tofu`, OpenTofu 1.13.1 planned both environments from
-  the same copy: 77 and 85 again, with the same provider versions.
-- **Formatting and validation.** `terraform fmt`, `terragrunt hcl fmt` and `terraform validate` pass for
-  every module. `terraform test` covers `ecs-service` with and without Redis, against a mocked provider.
-  It needs no credentials and creates nothing. To run it, from the root of the repo:
-
-  ```
-  cd modules/ecs-service
-  cp ../../live/dev/service/.terraform.lock.hcl .   # the same provider version the units use
-  terraform init -backend=false
-  terraform test
-  ```
-
-- **The state bucket bootstrap.** It was run on 9 October, and the bucket's versioning, encryption,
-  public access block and policy were read back.
-
-**By applying both environments in a real AWS account**
-
-- **All ten units applied,** 77 resources in dev and 85 in prod, each unit using the real outputs of the
-  ones before it. A second plan reported no changes in any of them.
-- **The zones.** In both environments the nine subnets are in `use1-az1`, `use1-az2` and `use1-az4`,
-  three in each.
-- **The startup check.** Every task logged `Redis replied: PONG` and only then started podinfo. That one
-  line covers the network path, the security groups, TLS, the AUTH token and the secret injection.
-- **A failing check, three ways.** In dev, one value of the service's `redis` input was set wrong on
-  purpose, with the other three right:
-  - *The port.* The check got no reply and gave up after its ten seconds.
-  - *The token.* Redis answered at once with `WRONGPASS`: it was reached, and it refused the login.
-  - *The security group,* with the tasks left out of the client group. No reply again. The port and the
-    token were right this time, so it was the security groups that stopped it.
-
-  Each time podinfo never started in any task, the circuit breaker rolled the service back after three
-  or four failed tasks, eight to ten minutes in, the old task kept serving, and `apply` ended with an
-  error.
-- **A service without Redis.** The dev service was applied once with `redis = null`. It ran with one
-  container and one security group, and without the Redis token in its execution role's policy. A
-  second plan reported no changes. It was then put back.
-- **Prod's own settings,** read back from AWS:
-  - Redis has a primary and a replica in different zones, with automatic failover and Multi-AZ on, and
-    the snapshot and maintenance times as set.
-  - There is a NAT gateway per zone, and each private route table uses the gateway of its own zone.
-  - Three on-demand tasks run, one in each zone.
-  - Deletion protection is on, and every log group keeps 90 days.
-- **A Redis failover in prod.** ElastiCache's own failover test moved the primary to the replica in 20
-  seconds. Three new tasks then passed their startup check through the same endpoint name, and a plan
-  afterwards reported no changes. The check sends `PING`, which a replica answers too, so this shows the
-  endpoint leads to a node that accepts the connection and the token.
-- **Autoscaling, in dev.** Under about 2,060 requests a minute, against a target of 600 per task, the
-  service went from 1 task to 3, one in each zone, and was back at 1 task 23 minutes after the load
-  stopped. CPU never came near its 60% target: one task serving the whole load averaged 4% and peaked
-  under 7%. The test shows that the policy works, not where the target should be.
-- **Teardown.** Both environments were destroyed again. Prod's deletion protection had to be turned off
-  first, and Redis took its final snapshot on the way out. Each service was then asked directly, and
-  nothing that costs money was left.

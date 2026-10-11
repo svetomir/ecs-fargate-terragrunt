@@ -1,6 +1,13 @@
 variable "name" {
-  description = "Name of the service and of everything created for it, for example ecs-fargate-dev-podinfo."
+  description = "Name of the service and of everything created for it, for example ecs-fargate-dev-podinfo. At most 26 characters."
   type        = string
+
+  # The target group is named <name>-<port>. AWS allows that name 32 characters,
+  # and a port can take five of them.
+  validation {
+    condition     = length(var.name) <= 26
+    error_message = "name must be 26 characters or fewer, so that the target group's name fits in 32."
+  }
 }
 
 # --- Where it runs ---
@@ -28,6 +35,11 @@ variable "cluster_name" {
 variable "capacity_provider" {
   description = "FARGATE for on-demand capacity or FARGATE_SPOT for cheaper capacity that can be interrupted."
   type        = string
+
+  validation {
+    condition     = contains(["FARGATE", "FARGATE_SPOT"], var.capacity_provider)
+    error_message = "capacity_provider must be FARGATE or FARGATE_SPOT."
+  }
 }
 
 # --- How traffic reaches it ---
@@ -62,6 +74,12 @@ variable "path_patterns" {
 variable "image" {
   description = "Container image, with a fixed tag."
   type        = string
+}
+
+variable "ecr_repository_arns" {
+  description = "Private ECR repositories the task pulls its image from. Leave empty for a public image."
+  type        = list(string)
+  default     = []
 }
 
 variable "container_port" {
@@ -116,6 +134,14 @@ variable "redis" {
   default = null
 }
 
+# --- Anything else it calls ---
+
+variable "additional_security_group_ids" {
+  description = "Further security groups to attach to the tasks, for example the client group of a database. Each must bring its own rules for the traffic it is there for, as the Redis client group does: the service's own group lets out HTTPS and nothing else."
+  type        = list(string)
+  default     = []
+}
+
 # --- Scaling ---
 
 variable "min_tasks" {
@@ -126,6 +152,11 @@ variable "min_tasks" {
 variable "max_tasks" {
   description = "Most tasks autoscaling may run."
   type        = number
+
+  validation {
+    condition     = var.max_tasks >= var.min_tasks
+    error_message = "max_tasks must not be below min_tasks."
+  }
 }
 
 variable "requests_per_task_target" {

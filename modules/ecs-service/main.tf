@@ -154,8 +154,15 @@ resource "aws_ecs_service" "this" {
 
   network_configuration {
     subnets          = var.subnet_ids
-    security_groups  = concat([aws_security_group.service.id], local.uses_redis ? [var.redis.client_security_group_id] : [])
     assign_public_ip = false
+
+    # The service's own group, the Redis client group when Redis is used, and any
+    # further groups the caller passes in.
+    security_groups = concat(
+      [aws_security_group.service.id],
+      local.uses_redis ? [var.redis.client_security_group_id] : [],
+      var.additional_security_group_ids,
+    )
   }
 
   load_balancer {
@@ -199,6 +206,7 @@ resource "aws_ecs_service" "this" {
     aws_lb_listener_rule.this,
     aws_iam_role_policy.execution_logs,
     aws_iam_role_policy.execution_secrets,
+    aws_iam_role_policy.execution_pull,
   ]
 
   lifecycle {

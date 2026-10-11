@@ -2,8 +2,8 @@
 # and send. The target group and listener rule say which requests the load
 # balancer forwards to it.
 
-# The tasks' own security group. Together with the Redis client group attached in
-# main.tf, these rules are everything a task may receive or send.
+# The tasks' own security group. These rules, and those of any other group
+# attached in main.tf, are everything a task may receive or send.
 resource "aws_security_group" "service" {
   name        = var.name
   description = "Tasks of ${var.name}"
@@ -30,8 +30,15 @@ resource "aws_vpc_security_group_egress_rule" "https_out" {
 }
 
 # The load balancer's list of this service's tasks.
+#
+# AWS cannot change a target group's port in place, so a new port means a new
+# target group. With one fixed name that could not work: the old group would have
+# to be deleted first to free the name, and AWS refuses to delete a group that a
+# listener rule still forwards to. So the port is part of the name, and the
+# lifecycle block at the end creates the new group before the old one is deleted.
+# In between, the listener rule and the service move over to the new group.
 resource "aws_lb_target_group" "this" {
-  name     = var.name
+  name     = "${var.name}-${var.container_port}"
   vpc_id   = var.vpc_id
   port     = var.container_port
   protocol = "HTTP"
@@ -52,6 +59,10 @@ resource "aws_lb_target_group" "this" {
     timeout             = 5
     healthy_threshold   = 2
     unhealthy_threshold = 3
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
