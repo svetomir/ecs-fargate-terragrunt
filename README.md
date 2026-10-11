@@ -41,6 +41,19 @@ Each environment has five units. Each unit has its own state file.
 | `platform` | `network` | What every service shares: the ECS cluster and the load balancer with its listener, and the logs of both. | 19 / 19 |
 | `service` | all four | Everything that belongs to one service: target group, listener rule, task definition, ECS service, IAM roles, security group, log group, autoscaling. | 15 / 15 |
 
+`ecs-service` has a test,
+[`modules/ecs-service/tests/ecs_service.tftest.hcl`](modules/ecs-service/tests/ecs_service.tftest.hcl).
+Its nine runs cover the optional inputs (Redis, a private image, further security groups), the target
+group's name, and the inputs the module refuses. The AWS provider is mocked, so it needs no credentials
+and creates nothing:
+
+```
+cd modules/ecs-service
+cp ../../live/dev/service/.terraform.lock.hcl .   # the same provider version the units use
+terraform init -backend=false
+terraform test
+```
+
 ## How to plan it
 
 You need Terraform, Terragrunt and AWS credentials for any account. It was written and tested with
@@ -195,7 +208,7 @@ in the same run.
 What both have in common:
 
 - **The value is never in the plan or the state.** It is generated as an ephemeral `random_password` and
-  written through a write-only argument.
+  written through a write-only argument. Raising a version number generates a new one.
 - **Secrets Manager holds the only copy of the Redis token.** ElastiCache is given the value read back
   from the secret, not the generated one, so a re-run after a failed apply still uses the stored token.
 - **The task definition holds ARNs, not values.** ECS fetches the values when a task starts, so running
@@ -209,12 +222,14 @@ The load balancer is the only public entry point. Its listener answers 404 by de
 adds a rule that forwards only the paths it owns. For podinfo those are `/`, `/version`, `/api/*` and
 `/token*`.
 
-This matters because podinfo is a demo app: `GET /env` prints its environment and `GET /panic` kills
-the process. Neither path is forwarded.
+This matters because podinfo is a demo app: `GET /env` prints its environment, which includes its
+signing key, and `GET /panic` kills the process. Neither path is forwarded.
 
 Dev is not open to the internet. Its load balancer admits only the ranges in `ingress_cidrs`. The
 committed value, `203.0.113.0/24`, is a reserved documentation range, so dev stays closed until it is
-replaced with a real VPN or office range.
+replaced with a real VPN or office range. Setting `DEV_INGRESS_CIDR` in your shell, for example
+`export DEV_INGRESS_CIDR=198.51.100.7/32`, lets one address in without editing a file. Only
+`live/dev/platform` reads it.
 
 The listener is HTTP only. HTTPS needs a certificate for a domain, which a blank account does not have.
 
@@ -317,7 +332,9 @@ The ones that matter most come first.
 - **A Redis token, not IAM authentication.** IAM authentication stores no credential, which is better.
   But the client has to sign its own short-lived tokens, and `redis-cli` cannot, so the check would need
   a purpose-built image.
-- **Token rotation is not automated.** The Redis token is not rotated on a schedule.
+- **Token rotation is manual.** Raising `auth_token_version` generates a new token and writes it to the
+  secret and to ElastiCache. Nothing does that on a schedule, and tasks read the new value only when
+  they start.
 - **Planning the `redis` unit reads the token.** Once the secret exists, each plan reads it into memory
   to hand to ElastiCache. It is not stored, but whoever plans needs permission to read that secret.
 - **Modules are local paths.** Both environments always use the same module code. Modules in their own
@@ -336,6 +353,8 @@ The ones that matter most come first.
 - **`engine = "redis"`.** Valkey is the cheaper drop-in AWS now recommends.
 - **Logs go to CloudWatch, which charges per gigabyte delivered.** That is negligible here. At high
   traffic the same load balancer delivery can point at S3 instead.
+- **Two CloudWatch Logs resource policies per environment.** An account may have ten per region, so
+  many environments in one account would need a single shared policy.
 - **The state bucket is created by Terragrunt's bootstrap,** not managed as code. S3 is the only
   backend: there is no local-state mode, so the path you plan with is the one that would be used.
 
@@ -362,7 +381,7 @@ The rest, by area. The first three appear again in their groups, with the detail
 - One account per environment under an AWS organization, with an account level in the directory layout
   and `allowed_account_ids` on the provider.
 - CI that plans on pull requests and applies on merge, assuming a role per account.
-- `tflint`, a policy scanner and `terraform test` in that pipeline.
+- `tflint`, a policy scanner and the module test in that pipeline.
 - Modules in their own repository, versioned by tag.
 
 **Security**
